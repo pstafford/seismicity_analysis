@@ -18,8 +18,11 @@ stan = ["cmdstanpy>=1.1"]
 test = ["pytest>=7.0"]
 all = ["cmdstanpy>=1.1", "pytest>=7.0"]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 
 [tool.setuptools.package-data]
 seismicity_analysis = ["stan/*.stan"]
