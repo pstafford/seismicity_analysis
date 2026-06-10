@@ -128,10 +128,39 @@ def _completeness_start(mw, model):
     return np.nan
 
 
-def bin_magnitudes(cat, mw_min, mw_max, dm=0.1, model=None):
+def _in_completeness_window(mw, year, model, mw_min):
+    """
+    Boolean mask selecting events whose (magnitude, year) fall within the complete
+    recording window [start_year(m), end_year] of the completeness model.
+
+    Events below ``mw_min`` (the scatter-IN buffer that the L5 model retains) are
+    evaluated at ``mw_min``, i.e. they are assumed complete over the same window as
+    the lowest analysis bin (T_1). This is consistent with how the L5 likelihood and
+    the synthetic generator treat the sub-mw_min region.
+    """
+    mw = np.asarray(mw, dtype=float)
+    year = np.asarray(year, dtype=float)
+    mask = np.zeros(len(mw), dtype=bool)
+    for i in range(len(mw)):
+        m_eval = max(mw[i], mw_min)
+        start = _completeness_start(m_eval, model)
+        if not np.isnan(start) and start <= year[i] <= model.end_year:
+            mask[i] = True
+    return mask
+
+
+def bin_magnitudes(cat, mw_min, mw_max, dm=0.1, model=None, apply_completeness=True):
     """
     Bin catalogue magnitudes into magnitude bins. If a CompletenessModel is provided,
     each bin gets its own observation time; otherwise a single observation time is used.
+
+    When a CompletenessModel is provided and ``apply_completeness`` is True (the
+    default), only events that fall within the complete recording window for their
+    magnitude (year >= start_year, year <= end_year) are counted. This keeps the
+    event counts consistent with the per-bin observation times ``t_obs``; without it,
+    historical events from incomplete periods inflate the low-magnitude rates. The
+    filter is a no-op for synthetic catalogues (whose events lie within their windows
+    by construction) and when no model is supplied (uniform completeness).
 
     Returns a DataFrame with columns 'm_centre', 'n', 't_obs'.
     """
@@ -140,7 +169,11 @@ def bin_magnitudes(cat, mw_min, mw_max, dm=0.1, model=None):
     centres = (edges[:-1] + edges[1:]) / 2
     counts = np.zeros(n_bins, dtype=int)
 
-    for m in cat.mw:
+    for idx, m in enumerate(cat.mw):
+        if model is not None and apply_completeness:
+            start = _completeness_start(m, model)
+            if np.isnan(start) or not (start <= cat.year[idx] <= model.end_year):
+                continue
         for j in range(n_bins):
             if edges[j] <= m < edges[j + 1]:
                 counts[j] += 1
@@ -158,15 +191,28 @@ def bin_magnitudes(cat, mw_min, mw_max, dm=0.1, model=None):
     return pd.DataFrame({"m_centre": centres, "n": counts, "t_obs": t_obs})
 
 
-def prepare_for_L5(cat, config, model):
+def prepare_for_L5(cat, config, model, apply_completeness=True):
     """
     Prepare data for the L5 Full Bayesian model. Returns a dict with all
     fields needed by the Stan L5 implementations.
+
+    Events are retained if their reported ML is at or above the detection threshold
+    ``ml_threshold(mw_min)`` (which sits below mw_min, deliberately keeping the
+    scatter-IN buffer the L5 model requires). When ``apply_completeness`` is True
+    (the default), events are additionally required to fall within the complete
+    recording window for their magnitude — i.e. year in [start_year(m), end_year].
+    Buffer events below mw_min are evaluated at mw_min (the T_1 window). Without this,
+    events recorded before a magnitude band became complete are passed to Stan while
+    the per-bin observation times ``t_obs`` assume completeness, biasing the rate.
+    The filter is a no-op for synthetic catalogues, whose events lie within their
+    windows by construction.
     """
     thresh = ml_threshold(config.mw_min, dm_ml=config.dm_ml)
 
-    # Filter to events above ML threshold
+    # Filter to events above ML threshold, within the completeness window
     keep = cat.ml >= thresh["ml_threshold"]
+    if apply_completeness:
+        keep = keep & _in_completeness_window(cat.mw, cat.year, model, config.mw_min)
     ml_kept = cat.ml[keep]
     sigma_ml_kept = cat.sigma_ml[keep]
 
